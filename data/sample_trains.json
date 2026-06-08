@@ -1,0 +1,137 @@
+[
+  {
+    "train_number": "12301",
+    "train_name": "Howrah Rajdhani Express",
+    "source_code": "HWH",
+    "source_name": "Howrah Junction",
+    "destination_code": "NDLS",
+    "destination_name": "New Delhi",
+    "avg_delay_minutes": 22
+  },
+  {
+    "train_number": "12951",
+    "train_name": "Mumbai Rajdhani Express",
+    "source_code": "MMCT",
+    "source_name": "Mumbai Central",
+    "destination_code": "NDLS",
+    "destination_name": "New Delhi",
+    "avg_delay_minutes": 18
+  },
+  {
+    "train_number": "12433",
+    "train_name": "Chennai Rajdhani Express",
+    "source_code": "MAS",
+    "source_name": "Chennai Central",
+    "destination_code": "NDLS",
+    "destination_name": "New Delhi",
+    "avg_delay_minutes": 31
+  },
+  {
+    "train_number": "12002",
+    "train_name": "Bhopal Shatabdi Express",
+    "source_code": "NDLS",
+    "source_name": "New Delhi",
+    "destination_code": "BPL",
+    "destination_name": "Bhopal Junction",
+    "avg_delay_minutes": 14
+  },
+  {
+    "train_number": "12009",
+    "train_name": "Mumbai Shatabdi Express",
+    "source_code": "MMCT",
+    "source_name": "Mumbai Central",
+    "destination_code": "ADI",
+    "destination_name": "Ahmedabad Junction",
+    "avg_delay_minutes": 11
+  },
+  {
+    "train_number": "12213",
+    "train_name": "Delhi Duronto Express",
+    "source_code": "NDLS",
+    "source_name": "New Delhi",
+    "destination_code": "MMCT",
+    "destination_name": "Mumbai Central",
+    "avg_delay_minutes": 27
+  },
+  {
+    "train_number": "12285",
+    "train_name": "Secunderabad Duronto Express",
+    "source_code": "SC",
+    "source_name": "Secunderabad Junction",
+    "destination_code": "NDLS",
+    "destination_name": "New Delhi",
+    "avg_delay_minutes": 35
+  },
+  {
+    "train_number": "12595",
+    "train_name": "Gorakhpur Humsafar Express",
+    "source_code": "GKP",
+    "source_name": "Gorakhpur Junction",
+    "destination_code": "ANVT",
+    "destination_name": "Anand Vihar Terminal",
+    "avg_delay_minutes": 42
+  },
+  {
+    "train_number": "82501",
+    "train_name": "New Delhi Humsafar Express",
+    "source_code": "NDLS",
+    "source_name": "New Delhi",
+    "destination_code": "KOAA",
+    "destination_name": "Kolkata",
+    "avg_delay_minutes": 38
+  },
+  {
+    "train_number": "22439",
+    "train_name": "New Delhi Vande Bharat Express",
+    "source_code": "NDLS",
+    "source_name": "New Delhi",
+    "destination_code": "VBS",
+    "destination_name": "Varanasi Junction",
+    "avg_delay_minutes": 8
+  },
+  {
+    "train_number": "20901",
+    "train_name": "Mumbai Vande Bharat Express",
+    "source_code": "MMCT",
+    "source_name": "Mumbai Central",
+    "destination_code": "MAS",
+    "destination_name": "Chennai Central",
+    "avg_delay_minutes": 12
+  },
+  {
+    "train_number": "12203",
+    "train_name": "Garib Rath Express",
+    "source_code": "ANVT",
+    "source_name": "Anand Vihar Terminal",
+    "destination_code": "MAS",
+    "destination_name": "Chennai Central",
+    "avg_delay_minutes": 48
+  },
+  {
+    "train_number": "12155",
+    "train_name": "Bhopal Intercity Express",
+    "source_code": "BPL",
+    "source_name": "Bhopal Junction",
+    "destination_code": "NDLS",
+    "destination_name": "New Delhi",
+    "avg_delay_minutes": 19
+  },
+  {
+    "train_number": "12076",
+    "train_name": "Jan Shatabdi Express",
+    "source_code": "MAS",
+    "source_name": "Chennai Central",
+    "destination_code": "CBE",
+    "destination_name": "Coimbatore Junction",
+    "avg_delay_minutes": 16
+  },
+  {
+    "train_number": "12071",
+    "train_name": "Dadar Jan Shatabdi Express",
+    "source_code": "DR",
+    "source_name": "Dadar",
+    "destination_code": "JAT",
+    "destination_name": "Jammu Tawi",
+    "avg_delay_minutes": 29
+  }
+]

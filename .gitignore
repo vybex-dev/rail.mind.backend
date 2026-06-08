@@ -1,8 +1,22 @@
+# Secrets
 .env
 .env.example
+
+# Python
 __pycache__/
 *.pyc
+
+# Virtual environment
 .venv/
-saved_models/*.joblib
+
+# Ignore raw/large training data (not needed on Railway)
+data/train_delays.csv
+
+# Keep everything else in data/ — Railway needs these
+# (crowd_data.csv, sample_trains.json go to Railway)
+
+# Ignore PyTorch weights (too large, not used)
 saved_models/*.pt
-data/
+
+# Keep joblib models — Railway needs these to run
+# saved_models/*.joblib  ← REMOVE this line
