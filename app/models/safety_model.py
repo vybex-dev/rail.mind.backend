@@ -2,22 +2,14 @@
 Track Safety Detection Module — RailMind AI (Indian Railways).
 
 Uses OpenAI's CLIP model (via HuggingFace Transformers) for zero-shot
-image classification. CLIP compares the uploaded image against natural-language
-text descriptions of rail defects and picks the best-matching class without
-any fine-tuning or labelled training data.
+image classification.
 
-NOTE ON FIRST RUN:
-  On first execution, `transformers` will automatically download the
-  CLIP checkpoint (~600 MB) from HuggingFace Hub:
-      openai/clip-vit-base-patch32
-  Ensure you have a stable internet connection and sufficient disk space.
-  Subsequent runs use the cached weights (~/.cache/huggingface).
-
-FIX LOG (v2):
-  - Rewrote TEXT_DESCRIPTIONS to be far more visually specific per class
-  - Added CONFIDENCE_THRESHOLD: below 0.45 → default to "normal"
-  - Added MARGIN_THRESHOLD: if top-2 scores differ by < 0.10 → default to "normal"
-  - Both thresholds prevent false-positive defect calls on ambiguous images
+FIX LOG (v3):
+  - CLIP now loads in a background thread at startup (not blocking boot,
+    not lazy-on-first-request either — avoids cold-start timeouts)
+  - HF_HOME set to /tmp/hf_cache for Railway compatibility
+  - Preserved all v2 improvements: better TEXT_DESCRIPTIONS,
+    CONFIDENCE_THRESHOLD, MARGIN_THRESHOLD
 """
 
 from __future__ import annotations
@@ -25,21 +17,17 @@ from __future__ import annotations
 import logging
 import os
 import random
+import threading
 from datetime import datetime, timezone
 from io import BytesIO
 
 logger = logging.getLogger(__name__)
 
-# Point HuggingFace cache to /tmp so it persists within a Railway run
-# and doesn't conflict with read-only filesystem areas.
+# Point HuggingFace cache to /tmp — writable on Railway
 os.environ.setdefault("HF_HOME", "/tmp/hf_cache")
 os.environ.setdefault("TRANSFORMERS_CACHE", "/tmp/hf_cache")
 
-# ── Safety thresholds ────────────────────────────────────────────────────────
-# CONFIDENCE_THRESHOLD: if the winning class scores below this, the model
-#   is too uncertain to declare a defect — default to "normal".
-# MARGIN_THRESHOLD: if the gap between the top-2 classes is smaller than
-#   this, the model cannot meaningfully distinguish them — default to "normal".
+# ── Safety thresholds ─────────────────────────────────────────────────────────
 CONFIDENCE_THRESHOLD: float = 0.45
 MARGIN_THRESHOLD:     float = 0.10
 
@@ -48,15 +36,11 @@ class TrackSafetyDetector:
     """
     Zero-shot CLIP-based track defect classifier.
 
-    Compares an uploaded image against rich text descriptions for each
-    defect class and returns a structured safety report.  Falls back to
-    weighted-random mock results when the `transformers` / `torch`
-    dependencies are unavailable.
+    CLIP loads in a background thread at startup so:
+      - The server boots instantly (non-blocking)
+      - The first real request doesn't time out waiting for a 600 MB download
+      - Falls back to mock if torch/transformers are unavailable
     """
-
-    # ------------------------------------------------------------------ #
-    # Class-level configuration                                            #
-    # ------------------------------------------------------------------ #
 
     DEFECT_CLASSES: list[str] = [
         "normal",
@@ -85,14 +69,6 @@ class TrackSafetyDetector:
         "track_misalignment": "Reduce train speed on this segment. Schedule realignment.",
     }
 
-    # ── FIX 1: Rewritten TEXT_DESCRIPTIONS ───────────────────────────────
-    # Key principles:
-    #   • "normal" now strongly emphasises INTACT, PRISTINE, UNDAMAGED
-    #   • Each defect class uses very specific visual language that CLIP
-    #     can match to real damage — not generic terms that also match
-    #     normal track textures (e.g. "lines", "gaps", "spacing")
-    #   • Defect prompts require VISIBLE, OBVIOUS, CLEAR damage — not
-    #     anything that could be a shadow or natural track feature
     TEXT_DESCRIPTIONS: dict[str, str] = {
         "normal": (
             "a perfectly safe and intact railway track with smooth continuous "
@@ -132,82 +108,66 @@ class TrackSafetyDetector:
         ),
     }
 
-    # Weighted probabilities for mock mode (must sum to 1.0)
     _MOCK_WEIGHTS: list[float] = [0.55, 0.10, 0.15, 0.05, 0.10, 0.05]
 
     # ------------------------------------------------------------------ #
-    # Initialisation                                                       #
+    # Initialisation — starts background CLIP loader                      #
     # ------------------------------------------------------------------ #
 
     def __init__(self) -> None:
-        self.model     = None
-        self.processor = None
+        self.model      = None
+        self.processor  = None
         self.is_loaded: bool  = False
-        self._load_attempted: bool = False
-        # CLIP is NOT loaded here — it loads lazily on the first
-        # analyze_image() call to prevent Railway OOM crash-loops on startup.
-        logger.info(
-            "TrackSafetyDetector: initialised (CLIP will load on first use)."
-        )
+        self._loading:  bool  = False
+        self._lock = threading.Lock()
+
+        # Load CLIP in a daemon thread — server boots immediately,
+        # CLIP is ready well before any real traffic arrives.
+        t = threading.Thread(target=self._load_clip, daemon=True, name="clip-loader")
+        t.start()
+        logger.info("TrackSafetyDetector: CLIP loading in background thread …")
 
     # ------------------------------------------------------------------ #
-    # Lazy loader — called once, before the first real inference          #
+    # Background loader                                                    #
     # ------------------------------------------------------------------ #
 
-    def _ensure_loaded(self) -> None:
-        """Try to load CLIP exactly once. Never retries after first attempt."""
-        if self._load_attempted:
-            return
-        self._load_attempted = True
+    def _load_clip(self) -> None:
+        """Download and initialise CLIP. Runs exactly once in a daemon thread."""
+        with self._lock:
+            if self.is_loaded or self._loading:
+                return
+            self._loading = True
         try:
             import torch  # noqa: F401
             from transformers import CLIPModel, CLIPProcessor
 
             logger.info(
-                "Loading CLIP 'openai/clip-vit-base-patch32' on first use "
-                "(may download ~600 MB) …"
+                "Loading CLIP 'openai/clip-vit-base-patch32' "
+                "(may download ~600 MB on first run) …"
             )
-            self.model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-            self.processor = CLIPProcessor.from_pretrained(
-                "openai/clip-vit-base-patch32"
-            )
-            self.model.eval()
+            model     = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+            processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+            model.eval()
+
+            self.model     = model
+            self.processor = processor
             self.is_loaded = True
-            logger.info("TrackSafetyDetector: CLIP loaded successfully.")
+            logger.info("TrackSafetyDetector: CLIP loaded successfully ✅")
 
         except (ImportError, Exception) as exc:
             self.is_loaded = False
-            print(
-                f"WARNING: CLIP not available ({exc.__class__.__name__}: {exc}) "
-                "— TrackSafetyDetector in mock mode"
-            )
             logger.warning(
-                "TrackSafetyDetector: CLIP unavailable (%s). Running in mock mode.",
-                exc,
+                "TrackSafetyDetector: CLIP unavailable (%s) — running in mock mode.", exc
             )
+        finally:
+            self._loading = False
 
     # ------------------------------------------------------------------ #
     # Public API                                                           #
     # ------------------------------------------------------------------ #
 
     def analyze_image(self, image_bytes: bytes) -> dict:
-        """
-        Classify a raw image and return a structured safety report.
-
-        Parameters
-        ----------
-        image_bytes : bytes
-            Raw bytes of the uploaded image file (JPEG / PNG / BMP …).
-
-        Returns
-        -------
-        dict
-            Structured safety report including defect type, confidence,
-            severity, recommended action, per-class score breakdown, and
-            an ISO-8601 UTC timestamp.
-        """
-        self._ensure_loaded()   # ← lazy: CLIP loads here on first call only
-
+        """Classify a raw image and return a structured safety report."""
         timestamp = datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
         if self.is_loaded:
@@ -239,39 +199,19 @@ class TrackSafetyDetector:
     def _clip_predict(
         self, image_bytes: bytes
     ) -> tuple[str, float, dict[str, float]]:
-        """
-        Run CLIP zero-shot classification with confidence + margin thresholds.
-
-        FIX 2 added here:
-          • If top class confidence < CONFIDENCE_THRESHOLD → return "normal"
-          • If gap between top-2 classes < MARGIN_THRESHOLD → return "normal"
-          Both rules prevent low-confidence false positives being reported
-          as dangerous defects to judges / passengers.
-
-        Returns
-        -------
-        tuple[str, float, dict[str, float]]
-            (winning_class, confidence, {class: probability, …})
-        """
         import torch
         from PIL import Image
 
         image = Image.open(BytesIO(image_bytes)).convert("RGB")
-
-        # Keep text prompts in the same order as DEFECT_CLASSES
         texts = [self.TEXT_DESCRIPTIONS[cls] for cls in self.DEFECT_CLASSES]
 
         inputs = self.processor(
-            text=texts,
-            images=image,
-            return_tensors="pt",
-            padding=True,
+            text=texts, images=image, return_tensors="pt", padding=True,
         )
 
         with torch.no_grad():
             outputs = self.model(**inputs)
 
-        # logits_per_image shape: [1, num_classes]
         probs = outputs.logits_per_image.softmax(dim=1)[0]
 
         all_probs: dict[str, float] = {
@@ -283,47 +223,28 @@ class TrackSafetyDetector:
         defect_type = self.DEFECT_CLASSES[best_idx]
         confidence  = float(probs[best_idx])
 
-        # ── FIX 2: confidence + margin safety thresholds ──────────────
+        # Confidence + margin safety thresholds
         sorted_probs = sorted(probs.tolist(), reverse=True)
         margin       = sorted_probs[0] - sorted_probs[1]
 
         if confidence < CONFIDENCE_THRESHOLD or margin < MARGIN_THRESHOLD:
             logger.info(
-                "Threshold triggered — conf=%.3f (min %.2f), margin=%.3f (min %.2f) "
-                "→ overriding '%s' to 'normal'",
-                confidence, CONFIDENCE_THRESHOLD,
-                margin,     MARGIN_THRESHOLD,
-                defect_type,
+                "Threshold triggered — conf=%.3f margin=%.3f → overriding '%s' to 'normal'",
+                confidence, margin, defect_type,
             )
             defect_type = "normal"
-            # Report confidence as certainty that NO clear defect was found.
-            # Formula: how far the top defect score is from a convincing threshold.
-            # e.g. top=0.36 → normal_confidence = 1 - 0.36 = 0.64 (64% certain it's fine)
-            confidence = round(1.0 - sorted_probs[0], 3)
+            confidence  = round(1.0 - sorted_probs[0], 3)
 
         return defect_type, confidence, all_probs
 
     def get_mock_analysis(self) -> tuple[str, float]:
-        """
-        Return a randomly sampled (defect_type, confidence) pair for mock mode.
-
-        Weights updated to match real-world class distribution:
-            normal: 55%  (most tracks are fine)
-            crack: 10%  |  missing_bolt: 15%  |  rail_break: 5%
-            debris_on_track: 10%  |  track_misalignment: 5%
-        """
         defect_type: str = random.choices(
-            self.DEFECT_CLASSES,
-            weights=self._MOCK_WEIGHTS,
-            k=1,
+            self.DEFECT_CLASSES, weights=self._MOCK_WEIGHTS, k=1,
         )[0]
         confidence: float = round(random.uniform(0.72, 0.95), 3)
         return defect_type, confidence
 
     def build_description(self, defect_type: str, confidence: float) -> str:
-        """
-        Build a concise human-readable description of the analysis result.
-        """
         pct      = round(confidence * 100, 1)
         severity = self.SEVERITY[defect_type]
 
@@ -337,14 +258,12 @@ class TrackSafetyDetector:
             f"Analysis detected {defect_type.replace('_', ' ')} on track segment "
             f"with {pct}% confidence."
         )
-
         if severity in {"high", "critical"}:
             return f"WARNING: {base}"
-
         return base
 
 
 # ---------------------------------------------------------------------------
-# Module-level singleton — imported by the safety router.
+# Module-level singleton
 # ---------------------------------------------------------------------------
 track_safety_detector = TrackSafetyDetector()
