@@ -1,0 +1,8 @@
+.env
+.env.example
+__pycache__/
+*.pyc
+.venv/
+saved_models/*.joblib
+saved_models/*.pt
+data/

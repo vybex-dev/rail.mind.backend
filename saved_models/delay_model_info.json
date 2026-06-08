@@ -1,0 +1,25 @@
+{
+  "trained_at": "2026-06-07T11:02:00.528797+00:00",
+  "mae": 9.723,
+  "rmse": 12.9824,
+  "r2": 0.3533,
+  "n_samples": 50000,
+  "n_train": 40000,
+  "n_test": 10000,
+  "features": [
+    "hour_of_day",
+    "day_of_week",
+    "month",
+    "is_weekend",
+    "is_peak_hour",
+    "route_encoded",
+    "train_encoded"
+  ],
+  "model_params": {
+    "n_estimators": 300,
+    "max_depth": 6,
+    "learning_rate": 0.05,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8
+  }
+}
