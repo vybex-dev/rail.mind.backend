@@ -10,23 +10,18 @@ POST /safety/analyze — upload an image; returns defect classification + AI ale
 GET  /safety/recent  — last ≤10 analyses (in-memory, resets on restart)
 GET  /safety/status  — CLIP model load status and supported defect classes
 
-Schema note
------------
-`SafetyResponse` (app/schemas/safety.py) must include:
-
-    alert_message: str = ""
-
-so that the AI-generated alert is serialised and returned to the client.
-
-In-memory ring buffer
----------------------
-`recent_analyses` stores the last 10 result dicts (plain dicts, not models)
-so they survive Pydantic serialisation round-trips cleanly.
-The list resets whenever the server process restarts.
+Fix note (v4)
+-------------
+CLIP loads lazily on the first /safety/analyze request via _ensure_loaded().
+Because _ensure_loaded() can block for a long time (downloading ~600 MB),
+we run analyze_image() in a thread-pool executor via asyncio.to_thread()
+so the async event loop is never frozen during the download.
+All subsequent requests are fast (model already in memory).
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
@@ -64,6 +59,8 @@ _MAX_RECENT = 10
         "The CLIP model classifies it into one of the defect categories "
         "and returns a structured safety report together with an AI-generated "
         "operations alert from RailMind Agent. "
+        "On the very first call CLIP will load (~600 MB) — this takes "
+        "30–90 seconds on Railway free tier. Subsequent calls are fast. "
         "Falls back to weighted-random mock results when CLIP is unavailable."
     ),
 )
@@ -78,12 +75,9 @@ async def analyze_track(
     ----
     1. Validate MIME type.
     2. Read bytes.
-    3. Run CLIP safety classifier.
-    4. Ask RailMind Agent (Claude) to produce a formal operations alert.
+    3. Run CLIP safety classifier in a thread (lazy-loads CLIP on first call).
+    4. Ask RailMind Agent to produce a formal operations alert.
     5. Merge alert into result dict, update ring buffer, and return.
-
-    The agent call is wrapped in its own try/except so a Claude API failure
-    never blocks the core classification response.
     """
     # ── 1. Validate MIME type ──────────────────────────────────────────────
     content_type: str = file.content_type or ""
@@ -109,9 +103,14 @@ async def analyze_track(
     if not contents:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
-    # ── 3. Run CLIP classifier ─────────────────────────────────────────────
+    # ── 3. Run CLIP classifier in a thread ────────────────────────────────
+    # IMPORTANT: analyze_image() calls _ensure_loaded() which can block for
+    # 30–90 seconds on first run (CLIP download). Running it via asyncio.to_thread
+    # keeps the FastAPI event loop responsive during the download.
     try:
-        result: dict = track_safety_detector.analyze_image(contents)
+        result: dict = await asyncio.to_thread(
+            track_safety_detector.analyze_image, contents
+        )
     except Exception as exc:
         logger.exception("Safety analysis failed: %s", exc)
         raise HTTPException(
@@ -132,7 +131,7 @@ async def analyze_track(
         alert = rail_agent.generate_safety_alert(result, location=location)
     except Exception as exc:
         logger.warning("Agent safety alert failed (non-fatal): %s", exc)
-        alert = rail_agent._fallback_safety_alert(result)   # always available
+        alert = rail_agent._fallback_safety_alert(result)
 
     result["alert_message"] = alert
 
@@ -182,17 +181,24 @@ async def get_recent_analyses() -> RecentAnalysesResponse:
     response_model=SafetyStatusResponse,
     summary="Model status",
     description=(
-        "Returns whether the CLIP model is loaded (AI mode) or "
-        "running as a mock, plus the list of supported defect classes."
+        "Returns whether the CLIP model is loaded (AI mode), "
+        "pending first request (lazy mode), permanently failed (mock mode), "
+        "plus the list of supported defect classes."
     ),
 )
 async def get_model_status() -> SafetyStatusResponse:
     """Report the current operational mode of the TrackSafetyDetector."""
     try:
         loaded: bool = track_safety_detector.is_loaded
+        if loaded:
+            mode = "ai"
+        elif track_safety_detector._load_failed:
+            mode = "mock"
+        else:
+            mode = "lazy"
         return SafetyStatusResponse(
             clip_model_loaded=loaded,
-            mode="ai" if loaded else "mock",
+            mode=mode,
             supported_defects=TrackSafetyDetector.DEFECT_CLASSES,
         )
     except Exception as exc:

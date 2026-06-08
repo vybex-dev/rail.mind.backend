@@ -4,12 +4,16 @@ Track Safety Detection Module — RailMind AI (Indian Railways).
 Uses OpenAI's CLIP model (via HuggingFace Transformers) for zero-shot
 image classification.
 
-FIX LOG (v3):
-  - CLIP now loads in a background thread at startup (not blocking boot,
-    not lazy-on-first-request either — avoids cold-start timeouts)
-  - HF_HOME set to /tmp/hf_cache for Railway compatibility
-  - Preserved all v2 improvements: better TEXT_DESCRIPTIONS,
-    CONFIDENCE_THRESHOLD, MARGIN_THRESHOLD
+FIX LOG (v4):
+  - CLIP now loads LAZILY — only on the first real /safety/analyze request.
+  - Removed background thread that was downloading 600 MB at startup and
+    causing OOM crashes on Railway free tier (~512 MB RAM).
+  - App boots instantly with zero CLIP memory usage.
+  - CLIP loads once on first request, then stays in memory for all subsequent
+    requests (no per-request reload).
+  - Falls back to mock if torch/transformers are unavailable.
+  - HF_HOME set to /tmp/hf_cache for Railway compatibility.
+  - All v2/v3 improvements preserved: TEXT_DESCRIPTIONS, thresholds, etc.
 """
 
 from __future__ import annotations
@@ -36,10 +40,14 @@ class TrackSafetyDetector:
     """
     Zero-shot CLIP-based track defect classifier.
 
-    CLIP loads in a background thread at startup so:
-      - The server boots instantly (non-blocking)
-      - The first real request doesn't time out waiting for a 600 MB download
-      - Falls back to mock if torch/transformers are unavailable
+    CLIP loads LAZILY — only when analyze_image() is first called.
+    This means:
+      - The server boots with ~0 MB of CLIP memory overhead.
+      - Railway free tier (~512 MB) can run delay + crowd models at startup
+        without OOM crashing.
+      - On the first /safety/analyze request, CLIP loads once and stays in
+        memory for all subsequent requests (thread-safe via a lock).
+      - Falls back to mock results if torch/transformers are unavailable.
     """
 
     DEFECT_CLASSES: list[str] = [
@@ -111,56 +119,66 @@ class TrackSafetyDetector:
     _MOCK_WEIGHTS: list[float] = [0.55, 0.10, 0.15, 0.05, 0.10, 0.05]
 
     # ------------------------------------------------------------------ #
-    # Initialisation — starts background CLIP loader                      #
+    # Initialisation — NO background thread, NO eager loading             #
     # ------------------------------------------------------------------ #
 
     def __init__(self) -> None:
         self.model      = None
         self.processor  = None
-        self.is_loaded: bool  = False
-        self._loading:  bool  = False
+        self.is_loaded: bool = False
+        self._load_failed: bool = False   # stops re-trying after a hard failure
         self._lock = threading.Lock()
-
-        # Load CLIP in a daemon thread — server boots immediately,
-        # CLIP is ready well before any real traffic arrives.
-        t = threading.Thread(target=self._load_clip, daemon=True, name="clip-loader")
-        t.start()
-        logger.info("TrackSafetyDetector: CLIP loading in background thread …")
+        # ⚠️  Do NOT start a thread or import torch here.
+        # CLIP will be loaded on the first call to analyze_image().
+        logger.info("TrackSafetyDetector: initialised (CLIP will load on first request)")
 
     # ------------------------------------------------------------------ #
-    # Background loader                                                    #
+    # Lazy loader — called inside analyze_image()                          #
     # ------------------------------------------------------------------ #
 
-    def _load_clip(self) -> None:
-        """Download and initialise CLIP. Runs exactly once in a daemon thread."""
+    def _ensure_loaded(self) -> None:
+        """
+        Load CLIP exactly once, on the first real request.
+
+        Thread-safe: uses a lock so concurrent requests don't trigger
+        multiple simultaneous downloads.
+        After a hard failure the flag _load_failed is set and we skip
+        subsequent attempts (fall back to mock permanently).
+        """
+        # Fast path — already loaded or permanently failed
+        if self.is_loaded or self._load_failed:
+            return
+
         with self._lock:
-            if self.is_loaded or self._loading:
+            # Re-check inside the lock (another thread may have loaded it)
+            if self.is_loaded or self._load_failed:
                 return
-            self._loading = True
-        try:
-            import torch  # noqa: F401
-            from transformers import CLIPModel, CLIPProcessor
 
-            logger.info(
-                "Loading CLIP 'openai/clip-vit-base-patch32' "
-                "(may download ~600 MB on first run) …"
-            )
-            model     = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-            processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-            model.eval()
+            try:
+                import torch  # noqa: F401
+                from transformers import CLIPModel, CLIPProcessor
 
-            self.model     = model
-            self.processor = processor
-            self.is_loaded = True
-            logger.info("TrackSafetyDetector: CLIP loaded successfully ✅")
+                logger.info(
+                    "Loading CLIP 'openai/clip-vit-base-patch32' on first request "
+                    "(may download ~600 MB on first run) …"
+                )
+                model     = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+                processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+                model.eval()
 
-        except (ImportError, Exception) as exc:
-            self.is_loaded = False
-            logger.warning(
-                "TrackSafetyDetector: CLIP unavailable (%s) — running in mock mode.", exc
-            )
-        finally:
-            self._loading = False
+                self.model     = model
+                self.processor = processor
+                self.is_loaded = True
+                logger.info("TrackSafetyDetector: CLIP loaded successfully ✅")
+
+            except (ImportError, Exception) as exc:
+                self._load_failed = True
+                self.is_loaded    = False
+                logger.warning(
+                    "TrackSafetyDetector: CLIP unavailable (%s) — "
+                    "falling back to mock mode permanently.",
+                    exc,
+                )
 
     # ------------------------------------------------------------------ #
     # Public API                                                           #
@@ -168,6 +186,9 @@ class TrackSafetyDetector:
 
     def analyze_image(self, image_bytes: bytes) -> dict:
         """Classify a raw image and return a structured safety report."""
+        # Trigger lazy load — no-op if already loaded or failed
+        self._ensure_loaded()
+
         timestamp = datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
         if self.is_loaded:

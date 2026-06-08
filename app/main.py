@@ -26,8 +26,8 @@ from app.routers.safety import router as safety_router
 # ── Model singletons (for /health status checks) ──────────────────────────
 from app.models.delay_model import delay_predictor
 from app.models.crowd_model import crowd_forecaster
-# NOTE: safety_model is imported lazily — CLIP (~600 MB) loads on first use,
-# not at startup, to prevent Railway from OOM-crashing during boot.
+# NOTE: CLIP (~600 MB) loads lazily on the FIRST /safety/analyze request —
+# NOT at startup — to prevent Railway free tier from OOM-crashing during boot.
 from app.models.safety_model import track_safety_detector
 
 logger = logging.getLogger(__name__)
@@ -61,9 +61,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         "  crowd_forecaster  loaded: %s",
         getattr(crowd_forecaster, "is_loaded", "unknown"),
     )
+    # CLIP is lazy — it won't be loaded yet at startup, that's intentional.
     logger.info(
-        "  track_safety_detector  loaded (CLIP): %s",
-        track_safety_detector.is_loaded,
+        "  track_safety_detector  mode: lazy (CLIP loads on first /safety/analyze request)"
     )
     logger.info("=" * 60)
 
@@ -137,22 +137,28 @@ async def health_check() -> dict:
       "modules": {
         "delay":  {"loaded": true},
         "crowd":  {"loaded": true},
-        "safety": {"loaded": false, "mode": "mock"}
+        "safety": {"loaded": false, "mode": "lazy"}
       }
     }
     ```
 
-    The `loaded` flag reflects whether the underlying ML model was
-    successfully initialised at startup.  A `false` value means the
-    module is running in mock/fallback mode — the API still responds,
-    but predictions are simulated rather than model-driven.
+    The `loaded` flag for safety reflects whether CLIP has been loaded yet.
+    It will be false until the first /safety/analyze request is made —
+    this is intentional (lazy loading to avoid OOM on Railway free tier).
+    Once loaded it becomes true and stays true.
     """
     safety_loaded: bool = track_safety_detector.is_loaded
 
-    # `delay_predictor` and `crowd_forecaster` expose `is_loaded` by convention;
-    # fall back to True if the attribute is absent (models that don't use the flag).
     delay_loaded: bool = getattr(delay_predictor, "is_loaded", True)
     crowd_loaded: bool = getattr(crowd_forecaster, "is_loaded", True)
+
+    # Determine safety mode label
+    if safety_loaded:
+        safety_mode = "ai"
+    elif track_safety_detector._load_failed:
+        safety_mode = "mock"
+    else:
+        safety_mode = "lazy"   # not yet loaded, will try on first request
 
     return {
         "status": "ok",
@@ -165,7 +171,7 @@ async def health_check() -> dict:
             },
             "safety": {
                 "loaded": safety_loaded,
-                "mode": "ai" if safety_loaded else "mock",
+                "mode": safety_mode,
             },
         },
     }
