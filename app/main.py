@@ -26,6 +26,8 @@ from app.routers.safety import router as safety_router
 # ── Model singletons (for /health status checks) ──────────────────────────
 from app.models.delay_model import delay_predictor
 from app.models.crowd_model import crowd_forecaster
+# NOTE: safety_model is imported lazily — CLIP (~600 MB) loads on first use,
+# not at startup, to prevent Railway from OOM-crashing during boot.
 from app.models.safety_model import track_safety_detector
 
 logger = logging.getLogger(__name__)

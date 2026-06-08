@@ -23,11 +23,17 @@ FIX LOG (v2):
 from __future__ import annotations
 
 import logging
+import os
 import random
 from datetime import datetime, timezone
 from io import BytesIO
 
 logger = logging.getLogger(__name__)
+
+# Point HuggingFace cache to /tmp so it persists within a Railway run
+# and doesn't conflict with read-only filesystem areas.
+os.environ.setdefault("HF_HOME", "/tmp/hf_cache")
+os.environ.setdefault("TRANSFORMERS_CACHE", "/tmp/hf_cache")
 
 # ── Safety thresholds ────────────────────────────────────────────────────────
 # CONFIDENCE_THRESHOLD: if the winning class scores below this, the model
@@ -136,15 +142,30 @@ class TrackSafetyDetector:
     def __init__(self) -> None:
         self.model     = None
         self.processor = None
-        self.is_loaded: bool = False
+        self.is_loaded: bool  = False
+        self._load_attempted: bool = False
+        # CLIP is NOT loaded here — it loads lazily on the first
+        # analyze_image() call to prevent Railway OOM crash-loops on startup.
+        logger.info(
+            "TrackSafetyDetector: initialised (CLIP will load on first use)."
+        )
 
+    # ------------------------------------------------------------------ #
+    # Lazy loader — called once, before the first real inference          #
+    # ------------------------------------------------------------------ #
+
+    def _ensure_loaded(self) -> None:
+        """Try to load CLIP exactly once. Never retries after first attempt."""
+        if self._load_attempted:
+            return
+        self._load_attempted = True
         try:
-            import torch  # noqa: F401 — side-effect: verify torch is present
+            import torch  # noqa: F401
             from transformers import CLIPModel, CLIPProcessor
 
             logger.info(
-                "Loading CLIP checkpoint 'openai/clip-vit-base-patch32' "
-                "(first run downloads ~600 MB) …"
+                "Loading CLIP 'openai/clip-vit-base-patch32' on first use "
+                "(may download ~600 MB) …"
             )
             self.model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
             self.processor = CLIPProcessor.from_pretrained(
@@ -185,6 +206,8 @@ class TrackSafetyDetector:
             severity, recommended action, per-class score breakdown, and
             an ISO-8601 UTC timestamp.
         """
+        self._ensure_loaded()   # ← lazy: CLIP loads here on first call only
+
         timestamp = datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
         if self.is_loaded:
