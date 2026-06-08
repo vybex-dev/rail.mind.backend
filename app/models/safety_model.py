@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import random
+import json
 import requests
 from datetime import datetime, timezone
 
@@ -79,13 +80,12 @@ class TrackSafetyDetector:
     _MOCK_WEIGHTS: list[float] = [0.55, 0.10, 0.15, 0.05, 0.10, 0.05]
 
     def __init__(self) -> None:
-        # Configuration parameters checked by health flags
         self.is_loaded: bool = True
         self._load_failed: bool = False
         
         self.hf_token = os.getenv("HF_TOKEN")
         self.api_url = "https://api-inference.huggingface.co/models/openai/clip-vit-base-patch32"
-        logger.info("TrackSafetyDetector: Running in Hugging Face Serverless API Mode.")
+        logger.info("TrackSafetyDetector: Running in Header-mapped Inference API Mode.")
 
     def analyze_image(self, image_bytes: bytes) -> dict:
         """Classify a raw image via Hugging Face API and return a structured safety report."""
@@ -109,7 +109,7 @@ class TrackSafetyDetector:
         }
 
     def _hf_api_predict(self, image_bytes: bytes) -> tuple[str, float, dict[str, float]]:
-        """Sends data using multipart form fields to protect validation schema arrays."""
+        """Sends raw image binary with classification arrays injected inside headers."""
         def get_fallback():
             def_type, conf = self.get_mock_analysis()
             base = (1.0 - conf) / (len(self.DEFECT_CLASSES) - 1)
@@ -118,31 +118,27 @@ class TrackSafetyDetector:
             return def_type, conf, probs
 
         if not self.hf_token:
-            logger.warning("HF_TOKEN variable missing! Defaulting to local generation fallback.")
+            logger.warning("HF_TOKEN missing from configuration. Defaulting to mock metrics.")
             return get_fallback()
 
         try:
-            headers = {"Authorization": f"Bearer {self.hf_token}"}
+            labels = [self.TEXT_DESCRIPTIONS[cls] for cls in self.DEFECT_CLASSES]
             
-            # Pack payload parameter strings safely alongside binary components
-            files = {
-                "image": ("image.jpg", image_bytes, "image/jpeg")
-            }
-            data = {
-                "candidate_labels": ",".join([self.TEXT_DESCRIPTIONS[cls] for cls in self.DEFECT_CLASSES])
+            headers = {
+                "Authorization": f"Bearer {self.hf_token}",
+                "xcandidate-labels": json.dumps(labels)
             }
 
-            response = requests.post(self.api_url, headers=headers, files=files, data=data, timeout=12)
+            response = requests.post(self.api_url, headers=headers, data=image_bytes, timeout=12)
 
             if response.status_code != 200:
-                logger.error(f"HF API returned status {response.status_code}: {response.text}")
+                logger.error(f"HF API returned error status {response.status_code}: {response.text}")
                 return get_fallback()
 
             predictions = response.json()
             if not isinstance(predictions, list) or len(predictions) == 0:
                 return get_fallback()
 
-            # Reverse map string targets back onto internal keys
             desc_to_class = {v: k for k, v in self.TEXT_DESCRIPTIONS.items()}
             
             all_probs = {}
@@ -152,10 +148,13 @@ class TrackSafetyDetector:
                 class_name = desc_to_class.get(label_desc, "normal")
                 all_probs[class_name] = score
 
+            for cls in self.DEFECT_CLASSES:
+                if cls not in all_probs:
+                    all_probs[cls] = 0.0
+
             best_class = max(all_probs, key=all_probs.get)
             best_confidence = all_probs[best_class]
 
-            # Reapply default structural threshold overrides
             sorted_scores = sorted(all_probs.values(), reverse=True)
             margin = sorted_scores[0] - sorted_scores[1] if len(sorted_scores) > 1 else 1.0
 
@@ -166,7 +165,7 @@ class TrackSafetyDetector:
             return best_class, best_confidence, all_probs
 
         except Exception as e:
-            logger.exception(f"Remote serverless parsing crashed: {e}")
+            logger.exception(f"Remote API pipeline evaluation failed: {e}")
             return get_fallback()
 
     def get_mock_analysis(self) -> tuple[str, float]:
@@ -177,7 +176,7 @@ class TrackSafetyDetector:
         return defect_type, confidence
 
     def build_description(self, defect_type: str, confidence: float) -> str:
-        pct      = round(confidence * 100, 1)
+        pct = round(confidence * 100, 1)
         severity = self.SEVERITY[defect_type]
 
         if defect_type == "normal":
