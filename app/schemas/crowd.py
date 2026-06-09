@@ -80,6 +80,7 @@ class CrowdResponse(BaseModel):
     forecast: list[ForecastHour]
     platform_allocation: list[PlatformAllocation]
     alert: Optional[str] = None
+    advisory: str = ""                              # AI crowd advisory from RailAgent
 
 
 class StationsListResponse(BaseModel):

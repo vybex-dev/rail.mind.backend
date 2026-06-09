@@ -100,6 +100,20 @@ async def predict_crowd(request: CrowdRequest) -> CrowdResponse:
             station_code=request.station_code.upper(),
             hours_ahead=request.hours_ahead,
         )
+
+        # AI crowd advisory — non-fatal if it fails
+        try:
+            from app.agent.rail_agent import rail_agent
+            advisory_result = rail_agent.generate_crowd_advisory(
+                station=result.get("station", request.station_code),
+                current_crowd=result.get("current_estimated_crowd", 0),
+                alert=result.get("alert"),
+            )
+            result["advisory"] = advisory_result.get("advisory", "")
+        except Exception as exc:
+            logger.warning("Crowd advisory failed (non-fatal): %s", exc)
+            result["advisory"] = ""
+
         return CrowdResponse(**result)
 
     except HTTPException:
