@@ -1,14 +1,15 @@
 """
 Track Safety Detection Module — RailMind AI (Indian Railways).
 
-Uses Claude claude-haiku-4-5-20251001 vision API for accurate track defect classification.
-Replaces the broken HuggingFace CLIP approach (unreachable from Railway + wrong API usage).
+Uses Groq's Llama 4 Scout vision API for track defect classification.
+Groq is free-tier and reachable from Railway's network.
 
-Why Claude vision instead of CLIP:
-  - api.anthropic.com is reachable from Railway's network
-  - Actual vision understanding vs fragile zero-shot label matching
-  - Returns structured JSON — no header hacks needed
-  - Graceful mock fallback when ANTHROPIC_API_KEY is absent
+Vision model : meta-llama/llama-4-scout-17b-16e-instruct
+  - Free on Groq
+  - Supports base64 image input + JSON mode
+  - OpenAI-compatible SDK (same groq SDK used by RailAgent)
+
+Fallback      : weighted-random mock when GROQ_API_KEY is absent or API fails.
 """
 
 from __future__ import annotations
@@ -18,26 +19,25 @@ import json
 import logging
 import os
 import random
-import requests
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
 # ── Safety thresholds ─────────────────────────────────────────────────────────
 CONFIDENCE_THRESHOLD: float = 0.45
-MARGIN_THRESHOLD: float = 0.10
+MARGIN_THRESHOLD:     float = 0.10
 
-# ── Anthropic API ─────────────────────────────────────────────────────────────
-_ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-_MODEL = "claude-haiku-4-5-20251001"   # fast + cheap, vision-capable
+# ── Groq vision model ─────────────────────────────────────────────────────────
+_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
 
 class TrackSafetyDetector:
     """
-    Claude-vision-powered track defect classifier.
+    Groq Llama-4-Scout-powered track defect classifier.
 
-    Falls back to weighted-random mock only when ANTHROPIC_API_KEY is absent
-    or the API call genuinely fails — and always tells the logger which path ran.
+    Reads GROQ_API_KEY from the environment (same key used by RailAgent).
+    Falls back to weighted-random mock only when the key is absent or the
+    API call genuinely fails — always logs which path ran.
     """
 
     DEFECT_CLASSES: list[str] = [
@@ -50,27 +50,27 @@ class TrackSafetyDetector:
     ]
 
     SEVERITY: dict[str, str] = {
-        "normal": "none",
-        "crack": "high",
-        "missing_bolt": "medium",
-        "rail_break": "critical",
-        "debris_on_track": "medium",
+        "normal":             "none",
+        "crack":              "high",
+        "missing_bolt":       "medium",
+        "rail_break":         "critical",
+        "debris_on_track":    "medium",
         "track_misalignment": "high",
     }
 
     ACTIONS: dict[str, str] = {
-        "normal": "No action required. Track is in good condition.",
-        "crack": "Schedule urgent inspection. Mark segment for repair within 24h.",
-        "missing_bolt": "Dispatch maintenance crew. Replace missing fasteners.",
-        "rail_break": "HALT all trains on this segment immediately. Emergency repair needed.",
-        "debris_on_track": "Clear debris before next train passage. Alert train control.",
+        "normal":             "No action required. Track is in good condition.",
+        "crack":              "Schedule urgent inspection. Mark segment for repair within 24h.",
+        "missing_bolt":       "Dispatch maintenance crew. Replace missing fasteners.",
+        "rail_break":         "HALT all trains on this segment immediately. Emergency repair needed.",
+        "debris_on_track":    "Clear debris before next train passage. Alert train control.",
         "track_misalignment": "Reduce train speed on this segment. Schedule realignment.",
     }
 
-    # Weighted mock fallback — "normal" gets 55% of random hits
+    # Weighted mock fallback — "normal" gets 55 % of random hits
     _MOCK_WEIGHTS: list[float] = [0.55, 0.10, 0.15, 0.05, 0.10, 0.05]
 
-    # ── System prompt sent to Claude ──────────────────────────────────────────
+    # ── System prompt ─────────────────────────────────────────────────────────
     _SYSTEM_PROMPT = """\
 You are a railway track safety inspector AI. Analyse the provided image and classify the track condition.
 
@@ -79,7 +79,7 @@ You MUST respond with ONLY a valid JSON object — no markdown fences, no preamb
 Required JSON format:
 {
   "defect_type": "<one of: normal | crack | missing_bolt | rail_break | debris_on_track | track_misalignment>",
-  "confidence": <float 0.0–1.0>,
+  "confidence": <float 0.0-1.0>,
   "all_scores": {
     "normal": <float>,
     "crack": <float>,
@@ -94,22 +94,33 @@ Rules:
 - all_scores values must sum to approximately 1.0
 - confidence must equal the score for the chosen defect_type
 - Be conservative: only flag a defect when clearly visible evidence exists
-- If the image is blurry, dark, or not a railway track, return defect_type "normal" with low confidence (0.5–0.6)
+- If the image is blurry, dark, or not a railway track, return defect_type "normal" with low confidence (0.5-0.6)
 - Do NOT include any text outside the JSON object
 """
 
     def __init__(self) -> None:
-        self.is_loaded: bool = True
+        self.is_loaded:   bool = True
         self._load_failed: bool = False
-        self._api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
 
-        if self._api_key:
-            logger.info(
-                "TrackSafetyDetector: ANTHROPIC_API_KEY found — running in Claude vision mode."
-            )
+        api_key = os.getenv("GROQ_API_KEY", "")
+        self._client = None
+
+        if api_key:
+            try:
+                from groq import Groq
+                self._client = Groq(api_key=api_key)
+                logger.info(
+                    "TrackSafetyDetector: GROQ_API_KEY found — running in "
+                    "Llama-4-Scout vision mode (model=%s).", _VISION_MODEL
+                )
+            except Exception as exc:
+                logger.warning(
+                    "TrackSafetyDetector: could not init Groq client (%s) — "
+                    "will use mock fallback.", exc
+                )
         else:
             logger.warning(
-                "TrackSafetyDetector: ANTHROPIC_API_KEY not set — will use mock fallback."
+                "TrackSafetyDetector: GROQ_API_KEY not set — will use mock fallback."
             )
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -120,12 +131,12 @@ Rules:
         defect_type, confidence, all_probs = self._classify(image_bytes)
 
         return {
-            "defect_type": defect_type,
-            "confidence": round(confidence, 3),
-            "severity": self.SEVERITY[defect_type],
-            "description": self.build_description(defect_type, confidence),
+            "defect_type":       defect_type,
+            "confidence":        round(confidence, 3),
+            "severity":          self.SEVERITY[defect_type],
+            "description":       self.build_description(defect_type, confidence),
             "recommended_action": self.ACTIONS[defect_type],
-            "safe_to_operate": defect_type in ["normal", "debris_on_track"],
+            "safe_to_operate":   defect_type in ["normal", "debris_on_track"],
             "analysis_timestamp": timestamp,
             "all_scores": {
                 cls: round(float(prob), 3) for cls, prob in all_probs.items()
@@ -137,77 +148,52 @@ Rules:
     def _classify(
         self, image_bytes: bytes
     ) -> tuple[str, float, dict[str, float]]:
-        """Route to Claude vision or mock depending on API key availability."""
-        if not self._api_key:
-            logger.warning("No ANTHROPIC_API_KEY — returning mock result.")
+        """Route to Groq vision or mock depending on client availability."""
+        if self._client is None:
+            logger.warning("No Groq client — returning mock result.")
             return self._mock_result()
+        return self._groq_vision_predict(image_bytes)
 
-        return self._claude_vision_predict(image_bytes)
-
-    def _claude_vision_predict(
+    def _groq_vision_predict(
         self, image_bytes: bytes
     ) -> tuple[str, float, dict[str, float]]:
-        """Call Claude Haiku vision API and parse the JSON classification result."""
-        # Detect image format from magic bytes (default jpeg)
+        """Call Groq Llama-4-Scout vision API and parse the JSON result."""
         media_type = _detect_media_type(image_bytes)
-        b64_image = base64.standard_b64encode(image_bytes).decode("utf-8")
+        b64_image  = base64.standard_b64encode(image_bytes).decode("utf-8")
+        data_url   = f"data:{media_type};base64,{b64_image}"
 
-        payload = {
-            "model": _MODEL,
-            "max_tokens": 512,
-            "system": self._SYSTEM_PROMPT,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": media_type,
-                                "data": b64_image,
+        try:
+            completion = self._client.chat.completions.create(
+                model=_VISION_MODEL,
+                max_tokens=512,
+                temperature=0.1,          # low temp → consistent structured output
+                response_format={"type": "json_object"},   # enforce JSON mode
+                messages=[
+                    {"role": "system", "content": self._SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": data_url},
                             },
-                        },
-                        {
-                            "type": "text",
-                            "text": (
-                                "Analyse this railway track image. "
-                                "Respond ONLY with the JSON classification object."
-                            ),
-                        },
-                    ],
-                }
-            ],
-        }
-
-        headers = {
-            "x-api-key": self._api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        }
-
-        try:
-            response = requests.post(
-                _ANTHROPIC_API_URL,
-                headers=headers,
-                json=payload,
-                timeout=30,
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Analyse this railway track image. "
+                                    "Respond ONLY with the JSON classification object."
+                                ),
+                            },
+                        ],
+                    },
+                ],
             )
-        except requests.exceptions.RequestException as exc:
-            logger.error("Claude API request failed (network): %s", exc)
-            return self._mock_result()
-
-        if response.status_code != 200:
-            logger.error(
-                "Claude API returned HTTP %s: %s",
-                response.status_code,
-                response.text[:300],
-            )
+        except Exception as exc:
+            logger.error("Groq vision API call failed: %s", exc)
             return self._mock_result()
 
         try:
-            resp_json = response.json()
-            raw_text: str = resp_json["content"][0]["text"].strip()
+            raw_text: str = completion.choices[0].message.content.strip()
 
             # Strip accidental markdown fences just in case
             if raw_text.startswith("```"):
@@ -218,7 +204,7 @@ Rules:
 
             parsed: dict = json.loads(raw_text)
         except Exception as exc:
-            logger.error("Failed to parse Claude API response: %s", exc)
+            logger.error("Failed to parse Groq vision response: %s", exc)
             return self._mock_result()
 
         return self._validate_and_extract(parsed)
@@ -230,28 +216,31 @@ Rules:
         defect_type = parsed.get("defect_type", "normal")
         if defect_type not in self.DEFECT_CLASSES:
             logger.warning(
-                "Claude returned unknown defect_type '%s', defaulting to normal.", defect_type
+                "Vision model returned unknown defect_type '%s', defaulting to normal.",
+                defect_type,
             )
             defect_type = "normal"
 
         all_scores_raw: dict = parsed.get("all_scores", {})
 
         # Fill any missing classes with 0
-        all_scores: dict[str, float] = {}
-        for cls in self.DEFECT_CLASSES:
-            all_scores[cls] = float(all_scores_raw.get(cls, 0.0))
+        all_scores: dict[str, float] = {
+            cls: float(all_scores_raw.get(cls, 0.0))
+            for cls in self.DEFECT_CLASSES
+        }
 
-        # Re-normalise to sum = 1.0 (guards against Claude rounding)
+        # Re-normalise to sum = 1.0
         total = sum(all_scores.values())
         if total > 0:
             all_scores = {k: v / total for k, v in all_scores.items()}
         else:
             all_scores = {cls: 1.0 / len(self.DEFECT_CLASSES) for cls in self.DEFECT_CLASSES}
 
-        confidence = float(parsed.get("confidence", all_scores.get(defect_type, 0.5)))
+        # Use normalised score for the winning class — NOT the raw parsed value
+        confidence = float(all_scores.get(defect_type, 0.5))
         confidence = max(0.0, min(1.0, confidence))
 
-        # Apply low-confidence safety net
+        # Low-confidence safety net
         sorted_scores = sorted(all_scores.values(), reverse=True)
         margin = sorted_scores[0] - sorted_scores[1] if len(sorted_scores) > 1 else 1.0
         if confidence < CONFIDENCE_THRESHOLD or margin < MARGIN_THRESHOLD:
@@ -260,10 +249,10 @@ Rules:
                 confidence, margin,
             )
             defect_type = "normal"
-            confidence = round(1.0 - sorted_scores[0], 3)
+            confidence  = round(all_scores.get("normal", sorted_scores[0]), 3)
 
         logger.info(
-            "Claude vision result: %s (conf=%.3f, margin=%.3f)",
+            "Groq vision result: %s (conf=%.3f, margin=%.3f)",
             defect_type, confidence, margin,
         )
         return defect_type, confidence, all_scores
@@ -271,10 +260,7 @@ Rules:
     # ── Mock fallback ─────────────────────────────────────────────────────────
 
     def _mock_result(self) -> tuple[str, float, dict[str, float]]:
-        """
-        Returns a weighted-random result.
-        Logs clearly so operators know the result is not from real analysis.
-        """
+        """Weighted-random result — logs clearly so operators know it's not real."""
         defect_type = random.choices(
             self.DEFECT_CLASSES, weights=self._MOCK_WEIGHTS, k=1
         )[0]
@@ -290,7 +276,7 @@ Rules:
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def build_description(self, defect_type: str, confidence: float) -> str:
-        pct = round(confidence * 100, 1)
+        pct      = round(confidence * 100, 1)
         severity = self.SEVERITY[defect_type]
 
         if defect_type == "normal":
@@ -303,9 +289,7 @@ Rules:
             f"Analysis detected {defect_type.replace('_', ' ')} on track "
             f"segment with {pct}% confidence."
         )
-        if severity in {"high", "critical"}:
-            return f"WARNING: {base}"
-        return base
+        return f"WARNING: {base}" if severity in {"high", "critical"} else base
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
