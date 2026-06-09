@@ -24,8 +24,11 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 # ── Safety thresholds ─────────────────────────────────────────────────────────
-CONFIDENCE_THRESHOLD: float = 0.45
-MARGIN_THRESHOLD:     float = 0.10
+# NOTE: For a safety system, low confidence on a DEFECT should NOT default to
+# "normal". Instead, uncertain results are kept as-is (or escalated).
+# We only override to "normal" when the model itself said "normal" confidently.
+CONFIDENCE_THRESHOLD: float = 0.30   # below this, keep the result but flag it
+MARGIN_THRESHOLD:     float = 0.05   # minimum gap between top-2 scores
 
 # ── Groq vision model ─────────────────────────────────────────────────────────
 _VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
@@ -71,15 +74,40 @@ class TrackSafetyDetector:
     _MOCK_WEIGHTS: list[float] = [0.55, 0.10, 0.15, 0.05, 0.10, 0.05]
 
     # ── System prompt ─────────────────────────────────────────────────────────
+    # Key design principles:
+    # 1. Prioritise DETECTION over conservatism — missed defects are dangerous
+    # 2. Give the model concrete visual descriptions of each defect class
+    # 3. Treat vegetation/weeds and track geometry issues as real defects
+    # 4. Only return "normal" when the track is clearly, unambiguously healthy
     _SYSTEM_PROMPT = """\
-You are a railway track safety inspector AI. Analyse the provided image and classify the track condition.
+You are an expert railway track safety inspector AI for Indian Railways. \
+Your job is to detect defects that could cause derailments or accidents.
 
-You MUST respond with ONLY a valid JSON object — no markdown fences, no preamble, no explanation.
+IMPORTANT: In railway safety, missing a real defect (false negative) is far more \
+dangerous than flagging a healthy track (false positive). When in doubt, flag it.
+
+Defect classes and what to look for:
+- normal: Rails are straight, intact, well-fastened. Ballast is clean and stable. \
+  No visible damage, no vegetation growing through the track bed. Only return this \
+  when the track is clearly safe.
+- crack: Visible fracture lines, splits, or surface cracks on the rail head or web.
+- missing_bolt: Absent or visibly loose fishplate bolts/nuts at rail joints. \
+  Look for missing fasteners, clips, or spikes along the rail.
+- rail_break: Rail completely severed, a gap in the rail, or severe deformation.
+- debris_on_track: Rocks, branches, objects, or foreign material on or across the rails.
+- track_misalignment: Rails that are not parallel, uneven gauge, buckled or kinked \
+  rail, excessive lateral displacement, or significant vegetation/weeds growing \
+  through the track bed causing ground disturbance. A track switch/junction that \
+  appears skewed or displaced also counts.
+
+You MUST respond with ONLY a valid JSON object — no markdown fences, no preamble, \
+no explanation.
 
 Required JSON format:
 {
   "defect_type": "<one of: normal | crack | missing_bolt | rail_break | debris_on_track | track_misalignment>",
   "confidence": <float 0.0-1.0>,
+  "reasoning": "<one sentence explaining exactly what you observed>",
   "all_scores": {
     "normal": <float>,
     "crack": <float>,
@@ -91,15 +119,18 @@ Required JSON format:
 }
 
 Rules:
-- all_scores values must sum to approximately 1.0
+- all_scores must sum to approximately 1.0
 - confidence must equal the score for the chosen defect_type
-- Be conservative: only flag a defect when clearly visible evidence exists
-- If the image is blurry, dark, or not a railway track, return defect_type "normal" with low confidence (0.5-0.6)
+- If you see weeds, vegetation, or plant growth on/through the track bed, \
+  classify as debris_on_track or track_misalignment (vegetation indicates ground \
+  disturbance and is a safety hazard)
+- If the image is genuinely unrecognisable (pitch black, extreme blur), \
+  return normal with confidence 0.50
 - Do NOT include any text outside the JSON object
 """
 
     def __init__(self) -> None:
-        self.is_loaded:   bool = True
+        self.is_loaded:    bool = True
         self._load_failed: bool = False
 
         api_key = os.getenv("GROQ_API_KEY", "")
@@ -128,15 +159,15 @@ Rules:
     def analyze_image(self, image_bytes: bytes) -> dict:
         """Classify a raw image and return a structured safety report."""
         timestamp = datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
-        defect_type, confidence, all_probs = self._classify(image_bytes)
+        defect_type, confidence, all_probs, reasoning = self._classify(image_bytes)
 
         return {
-            "defect_type":       defect_type,
-            "confidence":        round(confidence, 3),
-            "severity":          self.SEVERITY[defect_type],
-            "description":       self.build_description(defect_type, confidence),
+            "defect_type":        defect_type,
+            "confidence":         round(confidence, 3),
+            "severity":           self.SEVERITY[defect_type],
+            "description":        self.build_description(defect_type, confidence, reasoning),
             "recommended_action": self.ACTIONS[defect_type],
-            "safe_to_operate":   defect_type in ["normal", "debris_on_track"],
+            "safe_to_operate":    defect_type in ["normal", "debris_on_track"],
             "analysis_timestamp": timestamp,
             "all_scores": {
                 cls: round(float(prob), 3) for cls, prob in all_probs.items()
@@ -147,16 +178,17 @@ Rules:
 
     def _classify(
         self, image_bytes: bytes
-    ) -> tuple[str, float, dict[str, float]]:
+    ) -> tuple[str, float, dict[str, float], str]:
         """Route to Groq vision or mock depending on client availability."""
         if self._client is None:
             logger.warning("No Groq client — returning mock result.")
-            return self._mock_result()
+            defect_type, confidence, probs = self._mock_result()
+            return defect_type, confidence, probs, ""
         return self._groq_vision_predict(image_bytes)
 
     def _groq_vision_predict(
         self, image_bytes: bytes
-    ) -> tuple[str, float, dict[str, float]]:
+    ) -> tuple[str, float, dict[str, float], str]:
         """Call Groq Llama-4-Scout vision API and parse the JSON result."""
         media_type = _detect_media_type(image_bytes)
         b64_image  = base64.standard_b64encode(image_bytes).decode("utf-8")
@@ -166,8 +198,8 @@ Rules:
             completion = self._client.chat.completions.create(
                 model=_VISION_MODEL,
                 max_tokens=512,
-                temperature=0.1,          # low temp → consistent structured output
-                response_format={"type": "json_object"},   # enforce JSON mode
+                temperature=0.1,
+                response_format={"type": "json_object"},
                 messages=[
                     {"role": "system", "content": self._SYSTEM_PROMPT},
                     {
@@ -180,7 +212,10 @@ Rules:
                             {
                                 "type": "text",
                                 "text": (
-                                    "Analyse this railway track image. "
+                                    "Carefully inspect this railway track image for any defects. "
+                                    "Remember: vegetation, weeds, misaligned rails, missing "
+                                    "fasteners, and any foreign objects are all defects. "
+                                    "Only return 'normal' if the track is clearly safe. "
                                     "Respond ONLY with the JSON classification object."
                                 ),
                             },
@@ -190,7 +225,8 @@ Rules:
             )
         except Exception as exc:
             logger.error("Groq vision API call failed: %s", exc)
-            return self._mock_result()
+            defect_type, confidence, probs = self._mock_result()
+            return defect_type, confidence, probs, ""
 
         try:
             raw_text: str = completion.choices[0].message.content.strip()
@@ -205,14 +241,17 @@ Rules:
             parsed: dict = json.loads(raw_text)
         except Exception as exc:
             logger.error("Failed to parse Groq vision response: %s", exc)
-            return self._mock_result()
+            defect_type, confidence, probs = self._mock_result()
+            return defect_type, confidence, probs, ""
 
         return self._validate_and_extract(parsed)
 
     def _validate_and_extract(
         self, parsed: dict
-    ) -> tuple[str, float, dict[str, float]]:
-        """Validate parsed JSON and return (defect_type, confidence, all_scores)."""
+    ) -> tuple[str, float, dict[str, float], str]:
+        """Validate parsed JSON and return (defect_type, confidence, all_scores, reasoning)."""
+        reasoning = parsed.get("reasoning", "")
+
         defect_type = parsed.get("defect_type", "normal")
         if defect_type not in self.DEFECT_CLASSES:
             logger.warning(
@@ -236,26 +275,52 @@ Rules:
         else:
             all_scores = {cls: 1.0 / len(self.DEFECT_CLASSES) for cls in self.DEFECT_CLASSES}
 
-        # Use normalised score for the winning class — NOT the raw parsed value
+        # Use normalised score for the winning class
         confidence = float(all_scores.get(defect_type, 0.5))
         confidence = max(0.0, min(1.0, confidence))
 
-        # Low-confidence safety net
         sorted_scores = sorted(all_scores.values(), reverse=True)
         margin = sorted_scores[0] - sorted_scores[1] if len(sorted_scores) > 1 else 1.0
-        if confidence < CONFIDENCE_THRESHOLD or margin < MARGIN_THRESHOLD:
-            logger.info(
-                "Low confidence (%.2f) or narrow margin (%.2f) — returning normal.",
-                confidence, margin,
-            )
-            defect_type = "normal"
-            confidence  = round(all_scores.get("normal", sorted_scores[0]), 3)
+
+        # ── Safety-first threshold logic ──────────────────────────────────────
+        # Unlike a general classifier, we must NOT silently convert uncertain
+        # defect detections to "normal". Rules:
+        #   - If confidence is very low AND it said "normal" → trust it (track is ok)
+        #   - If confidence is very low AND it said a defect → keep the defect,
+        #     but log the uncertainty; operators will still see it
+        #   - Only override to "normal" when the model is genuinely uncertain
+        #     AND the top class is already "normal"
+        if confidence < CONFIDENCE_THRESHOLD:
+            if defect_type == "normal":
+                # Low-confidence "normal" is fine — track probably is ok
+                logger.info(
+                    "Low confidence normal (%.2f) — accepting as normal.", confidence
+                )
+            else:
+                # Low-confidence defect — keep it, flag uncertainty in logs
+                logger.warning(
+                    "Low confidence defect '%s' (%.2f, margin=%.2f) — "
+                    "keeping defect result (safety-first).",
+                    defect_type, confidence, margin,
+                )
+        elif margin < MARGIN_THRESHOLD:
+            # Very close scores between top classes — keep the defect class if it's
+            # not "normal", since ambiguity in safety context should favour caution
+            if defect_type != "normal":
+                logger.info(
+                    "Narrow margin (%.2f) on defect '%s' — keeping (safety-first).",
+                    margin, defect_type,
+                )
+            else:
+                logger.info(
+                    "Narrow margin (%.2f) on normal — accepting as normal.", margin
+                )
 
         logger.info(
-            "Groq vision result: %s (conf=%.3f, margin=%.3f)",
-            defect_type, confidence, margin,
+            "Groq vision result: %s (conf=%.3f, margin=%.3f) | %s",
+            defect_type, confidence, margin, reasoning,
         )
-        return defect_type, confidence, all_scores
+        return defect_type, confidence, all_scores, reasoning
 
     # ── Mock fallback ─────────────────────────────────────────────────────────
 
@@ -275,7 +340,9 @@ Rules:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def build_description(self, defect_type: str, confidence: float) -> str:
+    def build_description(
+        self, defect_type: str, confidence: float, reasoning: str = ""
+    ) -> str:
         pct      = round(confidence * 100, 1)
         severity = self.SEVERITY[defect_type]
 
@@ -289,6 +356,8 @@ Rules:
             f"Analysis detected {defect_type.replace('_', ' ')} on track "
             f"segment with {pct}% confidence."
         )
+        if reasoning:
+            base = f"{base} {reasoning}"
         return f"WARNING: {base}" if severity in {"high", "critical"} else base
 
 
