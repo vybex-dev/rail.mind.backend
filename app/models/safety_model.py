@@ -1,16 +1,23 @@
 """
 Track Safety Detection Module — RailMind AI (Indian Railways).
 
-Offloads CLIP processing to Hugging Face Serverless Inference API
-to ensure 100% stability on Railway free tier (~512 MB RAM).
+Uses Claude claude-haiku-4-5-20251001 vision API for accurate track defect classification.
+Replaces the broken HuggingFace CLIP approach (unreachable from Railway + wrong API usage).
+
+Why Claude vision instead of CLIP:
+  - api.anthropic.com is reachable from Railway's network
+  - Actual vision understanding vs fragile zero-shot label matching
+  - Returns structured JSON — no header hacks needed
+  - Graceful mock fallback when ANTHROPIC_API_KEY is absent
 """
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import os
 import random
-import json
 import requests
 from datetime import datetime, timezone
 
@@ -18,15 +25,19 @@ logger = logging.getLogger(__name__)
 
 # ── Safety thresholds ─────────────────────────────────────────────────────────
 CONFIDENCE_THRESHOLD: float = 0.45
-MARGIN_THRESHOLD:     float = 0.10
+MARGIN_THRESHOLD: float = 0.10
+
+# ── Anthropic API ─────────────────────────────────────────────────────────────
+_ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+_MODEL = "claude-haiku-4-5-20251001"   # fast + cheap, vision-capable
 
 
 class TrackSafetyDetector:
     """
-    Hugging Face API-driven track defect classifier.
-    
-    Zero local memory footprint, fast processing speeds, and bulletproof
-    hackathon error handling.
+    Claude-vision-powered track defect classifier.
+
+    Falls back to weighted-random mock only when ANTHROPIC_API_KEY is absent
+    or the API call genuinely fails — and always tells the logger which path ran.
     """
 
     DEFECT_CLASSES: list[str] = [
@@ -39,154 +50,276 @@ class TrackSafetyDetector:
     ]
 
     SEVERITY: dict[str, str] = {
-        "normal":             "none",
-        "crack":              "high",
-        "missing_bolt":       "medium",
-        "rail_break":         "critical",
-        "debris_on_track":    "medium",
+        "normal": "none",
+        "crack": "high",
+        "missing_bolt": "medium",
+        "rail_break": "critical",
+        "debris_on_track": "medium",
         "track_misalignment": "high",
     }
 
     ACTIONS: dict[str, str] = {
-        "normal":             "No action required. Track is in good condition.",
-        "crack":              "Schedule urgent inspection. Mark segment for repair within 24h.",
-        "missing_bolt":       "Dispatch maintenance crew. Replace missing fasteners.",
-        "rail_break":         "HALT all trains on this segment immediately. Emergency repair needed.",
-        "debris_on_track":    "Clear debris before next train passage. Alert train control.",
+        "normal": "No action required. Track is in good condition.",
+        "crack": "Schedule urgent inspection. Mark segment for repair within 24h.",
+        "missing_bolt": "Dispatch maintenance crew. Replace missing fasteners.",
+        "rail_break": "HALT all trains on this segment immediately. Emergency repair needed.",
+        "debris_on_track": "Clear debris before next train passage. Alert train control.",
         "track_misalignment": "Reduce train speed on this segment. Schedule realignment.",
     }
 
-    TEXT_DESCRIPTIONS: dict[str, str] = {
-        "normal": (
-            "a perfectly safe and intact railway track with smooth continuous steel rails"
-        ),
-        "crack": (
-            "a damaged railway track with a clearly visible crack fracture or split running directly through the solid steel rail metal"
-        ),
-        "missing_bolt": (
-            "a railway track where bolts nuts or fasteners are clearly absent, empty bolt holes are visible"
-        ),
-        "rail_break": (
-            "a catastrophically broken railway rail with a large gap or open separation in the metal"
-        ),
-        "debris_on_track": (
-            "railway tracks with large rocks boulders tree branches fallen trees or heavy foreign objects"
-        ),
-        "track_misalignment": (
-            "railway tracks that are visibly buckled bent curved or shifted sideways"
-        ),
-    }
-
+    # Weighted mock fallback — "normal" gets 55% of random hits
     _MOCK_WEIGHTS: list[float] = [0.55, 0.10, 0.15, 0.05, 0.10, 0.05]
+
+    # ── System prompt sent to Claude ──────────────────────────────────────────
+    _SYSTEM_PROMPT = """\
+You are a railway track safety inspector AI. Analyse the provided image and classify the track condition.
+
+You MUST respond with ONLY a valid JSON object — no markdown fences, no preamble, no explanation.
+
+Required JSON format:
+{
+  "defect_type": "<one of: normal | crack | missing_bolt | rail_break | debris_on_track | track_misalignment>",
+  "confidence": <float 0.0–1.0>,
+  "all_scores": {
+    "normal": <float>,
+    "crack": <float>,
+    "missing_bolt": <float>,
+    "rail_break": <float>,
+    "debris_on_track": <float>,
+    "track_misalignment": <float>
+  }
+}
+
+Rules:
+- all_scores values must sum to approximately 1.0
+- confidence must equal the score for the chosen defect_type
+- Be conservative: only flag a defect when clearly visible evidence exists
+- If the image is blurry, dark, or not a railway track, return defect_type "normal" with low confidence (0.5–0.6)
+- Do NOT include any text outside the JSON object
+"""
 
     def __init__(self) -> None:
         self.is_loaded: bool = True
         self._load_failed: bool = False
-        
-        self.hf_token = os.getenv("HF_TOKEN")
-        self.api_url = "https://api-inference.huggingface.co/models/openai/clip-vit-base-patch32"
-        logger.info("TrackSafetyDetector: Running in Header-mapped Inference API Mode.")
+        self._api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
+
+        if self._api_key:
+            logger.info(
+                "TrackSafetyDetector: ANTHROPIC_API_KEY found — running in Claude vision mode."
+            )
+        else:
+            logger.warning(
+                "TrackSafetyDetector: ANTHROPIC_API_KEY not set — will use mock fallback."
+            )
+
+    # ── Public API ────────────────────────────────────────────────────────────
 
     def analyze_image(self, image_bytes: bytes) -> dict:
-        """Classify a raw image via Hugging Face API and return a structured safety report."""
+        """Classify a raw image and return a structured safety report."""
         timestamp = datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
-        
-        # Hit the Hugging Face API
-        defect_type, confidence, all_probs = self._hf_api_predict(image_bytes)
+        defect_type, confidence, all_probs = self._classify(image_bytes)
 
         return {
-            "defect_type":        defect_type,
-            "confidence":         round(confidence, 3),
-            "severity":           self.SEVERITY[defect_type],
-            "description":        self.build_description(defect_type, confidence),
+            "defect_type": defect_type,
+            "confidence": round(confidence, 3),
+            "severity": self.SEVERITY[defect_type],
+            "description": self.build_description(defect_type, confidence),
             "recommended_action": self.ACTIONS[defect_type],
-            "safe_to_operate":    defect_type in ["normal", "debris_on_track"],
+            "safe_to_operate": defect_type in ["normal", "debris_on_track"],
             "analysis_timestamp": timestamp,
             "all_scores": {
-                cls: round(float(prob), 3)
-                for cls, prob in all_probs.items()
+                cls: round(float(prob), 3) for cls, prob in all_probs.items()
             },
         }
 
-    def _hf_api_predict(self, image_bytes: bytes) -> tuple[str, float, dict[str, float]]:
-        """Sends raw image binary with classification arrays injected inside headers."""
-        def get_fallback():
-            def_type, conf = self.get_mock_analysis()
-            base = (1.0 - conf) / (len(self.DEFECT_CLASSES) - 1)
-            probs = {cls: base for cls in self.DEFECT_CLASSES}
-            probs[def_type] = conf
-            return def_type, conf, probs
+    # ── Internal classification ───────────────────────────────────────────────
 
-        if not self.hf_token:
-            logger.warning("HF_TOKEN missing from configuration. Defaulting to mock metrics.")
-            return get_fallback()
+    def _classify(
+        self, image_bytes: bytes
+    ) -> tuple[str, float, dict[str, float]]:
+        """Route to Claude vision or mock depending on API key availability."""
+        if not self._api_key:
+            logger.warning("No ANTHROPIC_API_KEY — returning mock result.")
+            return self._mock_result()
+
+        return self._claude_vision_predict(image_bytes)
+
+    def _claude_vision_predict(
+        self, image_bytes: bytes
+    ) -> tuple[str, float, dict[str, float]]:
+        """Call Claude Haiku vision API and parse the JSON classification result."""
+        # Detect image format from magic bytes (default jpeg)
+        media_type = _detect_media_type(image_bytes)
+        b64_image = base64.standard_b64encode(image_bytes).decode("utf-8")
+
+        payload = {
+            "model": _MODEL,
+            "max_tokens": 512,
+            "system": self._SYSTEM_PROMPT,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": b64_image,
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": (
+                                "Analyse this railway track image. "
+                                "Respond ONLY with the JSON classification object."
+                            ),
+                        },
+                    ],
+                }
+            ],
+        }
+
+        headers = {
+            "x-api-key": self._api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
 
         try:
-            labels = [self.TEXT_DESCRIPTIONS[cls] for cls in self.DEFECT_CLASSES]
-            
-            headers = {
-                "Authorization": f"Bearer {self.hf_token}",
-                "xcandidate-labels": json.dumps(labels)
-            }
+            response = requests.post(
+                _ANTHROPIC_API_URL,
+                headers=headers,
+                json=payload,
+                timeout=30,
+            )
+        except requests.exceptions.RequestException as exc:
+            logger.error("Claude API request failed (network): %s", exc)
+            return self._mock_result()
 
-            response = requests.post(self.api_url, headers=headers, data=image_bytes, timeout=12)
+        if response.status_code != 200:
+            logger.error(
+                "Claude API returned HTTP %s: %s",
+                response.status_code,
+                response.text[:300],
+            )
+            return self._mock_result()
 
-            if response.status_code != 200:
-                logger.error(f"HF API returned error status {response.status_code}: {response.text}")
-                return get_fallback()
+        try:
+            resp_json = response.json()
+            raw_text: str = resp_json["content"][0]["text"].strip()
 
-            predictions = response.json()
-            if not isinstance(predictions, list) or len(predictions) == 0:
-                return get_fallback()
+            # Strip accidental markdown fences just in case
+            if raw_text.startswith("```"):
+                raw_text = raw_text.split("```")[1]
+                if raw_text.startswith("json"):
+                    raw_text = raw_text[4:]
+                raw_text = raw_text.strip()
 
-            desc_to_class = {v: k for k, v in self.TEXT_DESCRIPTIONS.items()}
-            
-            all_probs = {}
-            for pred in predictions:
-                label_desc = pred.get("label")
-                score = pred.get("score", 0.0)
-                class_name = desc_to_class.get(label_desc, "normal")
-                all_probs[class_name] = score
+            parsed: dict = json.loads(raw_text)
+        except Exception as exc:
+            logger.error("Failed to parse Claude API response: %s", exc)
+            return self._mock_result()
 
-            for cls in self.DEFECT_CLASSES:
-                if cls not in all_probs:
-                    all_probs[cls] = 0.0
+        return self._validate_and_extract(parsed)
 
-            best_class = max(all_probs, key=all_probs.get)
-            best_confidence = all_probs[best_class]
+    def _validate_and_extract(
+        self, parsed: dict
+    ) -> tuple[str, float, dict[str, float]]:
+        """Validate parsed JSON and return (defect_type, confidence, all_scores)."""
+        defect_type = parsed.get("defect_type", "normal")
+        if defect_type not in self.DEFECT_CLASSES:
+            logger.warning(
+                "Claude returned unknown defect_type '%s', defaulting to normal.", defect_type
+            )
+            defect_type = "normal"
 
-            sorted_scores = sorted(all_probs.values(), reverse=True)
-            margin = sorted_scores[0] - sorted_scores[1] if len(sorted_scores) > 1 else 1.0
+        all_scores_raw: dict = parsed.get("all_scores", {})
 
-            if best_confidence < CONFIDENCE_THRESHOLD or margin < MARGIN_THRESHOLD:
-                best_class = "normal"
-                best_confidence = round(1.0 - sorted_scores[0], 3)
+        # Fill any missing classes with 0
+        all_scores: dict[str, float] = {}
+        for cls in self.DEFECT_CLASSES:
+            all_scores[cls] = float(all_scores_raw.get(cls, 0.0))
 
-            return best_class, best_confidence, all_probs
+        # Re-normalise to sum = 1.0 (guards against Claude rounding)
+        total = sum(all_scores.values())
+        if total > 0:
+            all_scores = {k: v / total for k, v in all_scores.items()}
+        else:
+            all_scores = {cls: 1.0 / len(self.DEFECT_CLASSES) for cls in self.DEFECT_CLASSES}
 
-        except Exception as e:
-            logger.exception(f"Remote API pipeline evaluation failed: {e}")
-            return get_fallback()
+        confidence = float(parsed.get("confidence", all_scores.get(defect_type, 0.5)))
+        confidence = max(0.0, min(1.0, confidence))
 
-    def get_mock_analysis(self) -> tuple[str, float]:
-        defect_type: str = random.choices(
-            self.DEFECT_CLASSES, weights=self._MOCK_WEIGHTS, k=1,
+        # Apply low-confidence safety net
+        sorted_scores = sorted(all_scores.values(), reverse=True)
+        margin = sorted_scores[0] - sorted_scores[1] if len(sorted_scores) > 1 else 1.0
+        if confidence < CONFIDENCE_THRESHOLD or margin < MARGIN_THRESHOLD:
+            logger.info(
+                "Low confidence (%.2f) or narrow margin (%.2f) — returning normal.",
+                confidence, margin,
+            )
+            defect_type = "normal"
+            confidence = round(1.0 - sorted_scores[0], 3)
+
+        logger.info(
+            "Claude vision result: %s (conf=%.3f, margin=%.3f)",
+            defect_type, confidence, margin,
+        )
+        return defect_type, confidence, all_scores
+
+    # ── Mock fallback ─────────────────────────────────────────────────────────
+
+    def _mock_result(self) -> tuple[str, float, dict[str, float]]:
+        """
+        Returns a weighted-random result.
+        Logs clearly so operators know the result is not from real analysis.
+        """
+        defect_type = random.choices(
+            self.DEFECT_CLASSES, weights=self._MOCK_WEIGHTS, k=1
         )[0]
-        confidence: float = round(random.uniform(0.72, 0.95), 3)
-        return defect_type, confidence
+        confidence = round(random.uniform(0.72, 0.95), 3)
+        base = (1.0 - confidence) / (len(self.DEFECT_CLASSES) - 1)
+        probs = {cls: base for cls in self.DEFECT_CLASSES}
+        probs[defect_type] = confidence
+        logger.warning(
+            "MOCK result returned (no real analysis): %s @ %.3f", defect_type, confidence
+        )
+        return defect_type, confidence, probs
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
 
     def build_description(self, defect_type: str, confidence: float) -> str:
         pct = round(confidence * 100, 1)
         severity = self.SEVERITY[defect_type]
 
         if defect_type == "normal":
-            return f"Track appears to be in normal operating condition ({pct}% confidence). No defects detected."
+            return (
+                f"Track appears to be in normal operating condition "
+                f"({pct}% confidence). No defects detected."
+            )
 
-        base = f"Analysis detected {defect_type.replace('_', ' ')} on track segment with {pct}% confidence."
+        base = (
+            f"Analysis detected {defect_type.replace('_', ' ')} on track "
+            f"segment with {pct}% confidence."
+        )
         if severity in {"high", "critical"}:
             return f"WARNING: {base}"
         return base
 
 
-# Singleton instance
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _detect_media_type(data: bytes) -> str:
+    """Sniff image format from magic bytes; default to image/jpeg."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:4] in (b"GIF8", b"GIF9"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
+
+# Singleton instance — import this everywhere
 track_safety_detector = TrackSafetyDetector()
