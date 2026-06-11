@@ -19,7 +19,7 @@ Usage
     python generate_crowd_data.py --days 365 --out data/crowd_data.csv
 """
 
-from __future__ import annotations
+
 
 import argparse
 import os

@@ -19,7 +19,6 @@ so the async event loop is never frozen during the download.
 All subsequent requests are fast (model already in memory).
 """
 
-from __future__ import annotations
 
 import asyncio
 import logging

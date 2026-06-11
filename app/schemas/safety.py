@@ -5,7 +5,6 @@ Response → SafetyResponse, RecentAnalysesResponse, SafetyStatusResponse
 (No request schema needed — input is a multipart file upload.)
 """
 
-from __future__ import annotations
 
 from pydantic import BaseModel, Field
 

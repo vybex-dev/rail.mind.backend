@@ -10,10 +10,9 @@ GET  /crowd/stations               — list all supported stations
 POST /crowd/predict                — forecast crowd level for a station
 GET  /crowd/heatmap/{station_code} — 24-hour crowd heatmap for a station
 """
-
-from __future__ import annotations
-
+import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
@@ -28,9 +27,8 @@ from app.schemas.crowd import (
 )
 
 logger = logging.getLogger(__name__)
-
 router = APIRouter(prefix="/crowd", tags=["Crowd Forecasting"])
-
+_executor = ThreadPoolExecutor(max_workers=8)   # ← add this
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -161,22 +159,23 @@ async def get_heatmap(station_code: str) -> HeatmapResponse:
 
 @router.get("/ntes/delays")
 async def get_ntes_delays():
-    """Live delay data for the NTES strip in the frontend."""
     train_numbers = ["12301", "12951", "22439", "12002",
                      "12595", "12213", "12203", "12433"]
-    try:
-        delays = ntes_client.get_bulk_delays(train_numbers)
-        trains = [
-            {
-                "train_number": tn,
-                "delay_minutes": delay,
-                "train_name": next(
-                    (t["train_name"] for t in sample_trains if t["train_number"] == tn),
-                    tn
-                ),
-            }
-            for tn, delay in delays.items()
-        ]
-        return {"trains": trains, "source": "NTES"}
-    except Exception:
-        return {"trains": [], "source": "unavailable"}
+    loop = asyncio.get_running_loop()   # ← was get_event_loop()
+
+    async def fetch_one(tn: str):
+        return tn, await loop.run_in_executor(
+            _executor, ntes_client.get_running_status, tn
+        )
+
+    results = await asyncio.gather(*[fetch_one(tn) for tn in train_numbers])
+    trains = [
+        {
+            "train_number": tn,
+            "delay_minutes": status["delay_minutes"] if status else None,
+            "train_name": status.get("train_name", tn) if status else tn,
+        }
+        for tn, status in results
+        if status is not None
+    ]
+    return {"trains": trains, "source": "NTES"}

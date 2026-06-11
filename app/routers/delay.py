@@ -12,7 +12,7 @@ GET  /delay/stats         — operational statistics for the prediction service
 GET  /delay/agent-stream  — SSE: stream live agent reasoning about a delay
 """
 
-from __future__ import annotations
+
 
 import logging
 import random

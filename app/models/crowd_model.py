@@ -27,15 +27,12 @@ Usage
     result = crowd_forecaster.predict_crowd("NDLS", hours_ahead=2)
 """
 
-from __future__ import annotations
-
 import os
 import random
 import sys
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-import numpy as np
 
 # ---------------------------------------------------------------------------
 # Path setup

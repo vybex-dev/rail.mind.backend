@@ -33,7 +33,6 @@ When NTES is unreachable (timeouts, maintenance, IP blocks) the client
 returns None so callers gracefully fall back to the ML/statistical model.
 """
 
-from __future__ import annotations
 
 import json
 import logging
@@ -52,9 +51,9 @@ logger = logging.getLogger(__name__)
 
 NTES_BASE    = "https://enquiry.indianrail.gov.in/miniTrainQuery"
 NTES_HOME    = "https://enquiry.indianrail.gov.in/ntes/ntes/init"
-NTES_TIMEOUT = 12         # seconds — NTES is slow; be patient
+NTES_TIMEOUT = 5       # seconds — NTES is slow; be patient
 CACHE_TTL    = 60         # seconds — don't hammer the endpoint
-MAX_RETRIES  = 2
+MAX_RETRIES  = 1   
 
 # Mimic a real browser — NTES returns HTML (session page) to non-browser UAs
 HEADERS = {

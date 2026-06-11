@@ -12,7 +12,6 @@ Vision model : meta-llama/llama-4-scout-17b-16e-instruct
 Fallback      : weighted-random mock when GROQ_API_KEY is absent or API fails.
 """
 
-from __future__ import annotations
 
 import base64
 import json
