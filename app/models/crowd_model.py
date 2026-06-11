@@ -34,6 +34,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 
+IST = timezone(timedelta(hours=5, minutes=30))
+
 # ---------------------------------------------------------------------------
 # Path setup
 # ---------------------------------------------------------------------------
@@ -258,7 +260,7 @@ def _time_label(hour: int, ref_now: Optional[datetime] = None) -> str:
     it shows '6:00 AM tomorrow' — but we just show the time, not 'tomorrow',
     since the forecast chart already implies forward-looking order).
     """
-    now = ref_now or datetime.now()
+    now = ref_now or datetime.now(IST)    
     # Build a datetime that is today at `hour`, or tomorrow if that hour has passed
     target = now.replace(hour=hour % 24, minute=0, second=0, microsecond=0)
     return target.strftime("%-I:%M %p")
@@ -367,7 +369,7 @@ class CrowdForecaster:
             station_code = "NDLS"
 
         meta    = _REAL_DATA[station_code]
-        now     = datetime.now()
+        now = datetime.now(IST)   
         cur_h   = now.hour
 
         # Current crowd
@@ -429,7 +431,7 @@ class CrowdForecaster:
 
         total_platforms = _REAL_DATA[station_code]["platforms"]
         num_to_show     = min(4, total_platforms)
-        now             = datetime.now()
+        now = datetime.now(IST)   
 
         # ── Dynamic seed: changes every 10 minutes so platforms "rotate" ──
         # Using station + date + hour + 10-min-bucket as seed ensures:
@@ -533,7 +535,7 @@ class CrowdForecaster:
             station_code = "NDLS"
 
         station_data = _REAL_DATA[station_code]
-        now          = datetime.now()
+        now = datetime.now(IST)  
 
         hours:  list[int] = list(range(24))
         counts: list[int] = []
@@ -555,7 +557,7 @@ class CrowdForecaster:
             levels.append(_congestion(c, base))
 
         time_labels = [
-            datetime.now().replace(hour=h, minute=0).strftime("%-I%p").lower()
+            datetime.now(IST).replace(hour=h, minute=0).strftime("%-I%p").lower()
             for h in hours
         ]
 
