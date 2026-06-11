@@ -19,4 +19,7 @@ data/train_delays.csv
 saved_models/*.pt
 
 # Keep joblib models — Railway needs these to run
-# saved_models/*.joblib  ← REMOVE this line
+# saved_models/*.joblib
+__pycache__/
+*.pyc
+*.pyo

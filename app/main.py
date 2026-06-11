@@ -8,8 +8,7 @@ Interactive docs:
     http://localhost:8000/docs   (Swagger UI)
     http://localhost:8000/redoc  (ReDoc)
 """
-
-from __future__ import annotations
+import sys
 
 import logging
 from contextlib import asynccontextmanager
@@ -29,7 +28,7 @@ from app.models.crowd_model import crowd_forecaster
 # NOTE: CLIP (~600 MB) loads lazily on the FIRST /safety/analyze request —
 # NOT at startup — to prevent Railway free tier from OOM-crashing during boot.
 from app.models.safety_model import track_safety_detector
-
+sys.dont_write_bytecode = False 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------

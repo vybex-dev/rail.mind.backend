@@ -1,0 +1,65 @@
+{
+  "id": "MAS",
+  "name": "Chennai Central",
+  "zone": "SR",
+  "platforms": 12,
+  "width": 1100,
+  "height": 520,
+  "tracks": [
+    {"id":"T1","x1":50,"y1":80,"x2":1050,"y2":80,"type":"main","label":"Up Main"},
+    {"id":"T2","x1":50,"y1":120,"x2":1050,"y2":120,"type":"main","label":"Down Main"},
+    {"id":"T3","x1":80,"y1":190,"x2":680,"y2":190,"type":"platform","label":"PF 1"},
+    {"id":"T4","x1":80,"y1":220,"x2":680,"y2":220,"type":"platform","label":"PF 2"},
+    {"id":"T5","x1":80,"y1":250,"x2":680,"y2":250,"type":"platform","label":"PF 3"},
+    {"id":"T6","x1":80,"y1":280,"x2":680,"y2":280,"type":"platform","label":"PF 4"},
+    {"id":"T7","x1":80,"y1":310,"x2":680,"y2":310,"type":"platform","label":"PF 5"},
+    {"id":"T8","x1":80,"y1":340,"x2":680,"y2":340,"type":"platform","label":"PF 6"},
+    {"id":"T9","x1":80,"y1":370,"x2":680,"y2":370,"type":"platform","label":"PF 7"},
+    {"id":"T10","x1":80,"y1":400,"x2":680,"y2":400,"type":"platform","label":"PF 8"},
+    {"id":"T11","x1":700,"y1":190,"x2":1050,"y2":190,"type":"loop","label":"Loop 1"},
+    {"id":"T12","x1":700,"y1":295,"x2":1050,"y2":295,"type":"loop","label":"Loop 2"},
+    {"id":"T13","x1":700,"y1":400,"x2":1050,"y2":400,"type":"loop","label":"Loop 3"},
+    {"id":"T14","x1":80,"y1":450,"x2":600,"y2":450,"type":"yard","label":"Yard"},
+    {"id":"T15","x1":80,"y1":480,"x2":500,"y2":480,"type":"yard","label":"Stabling"}
+  ],
+  "crossovers": [
+    {"id":"X1","x":220,"y":80,"toY":120},
+    {"id":"X2","x":550,"y":80,"toY":120},
+    {"id":"X3","x":800,"y":80,"toY":120}
+  ],
+  "points": [
+    {"id":"P1","x":140,"y":80,"state":"normal","angle":12,"label":"P1"},
+    {"id":"P2","x":140,"y":120,"state":"reverse","angle":-12,"label":"P2"},
+    {"id":"P3","x":680,"y":190,"state":"normal","angle":10,"label":"P3"},
+    {"id":"P4","x":680,"y":310,"state":"normal","angle":10,"label":"P4"},
+    {"id":"P5","x":680,"y":400,"state":"reverse","angle":-10,"label":"P5"},
+    {"id":"P6","x":1020,"y":190,"state":"normal","angle":8,"label":"P6"}
+  ],
+  "signals": [
+    {"id":"S1","x":80,"y":72,"type":"home","aspect":"green","label":"H1"},
+    {"id":"S2","x":80,"y":112,"type":"home","aspect":"red","label":"H2"},
+    {"id":"S3","x":400,"y":72,"type":"starter","aspect":"yellow","label":"ST1"},
+    {"id":"S4","x":400,"y":112,"type":"starter","aspect":"green","label":"ST2"},
+    {"id":"S5","x":640,"y":182,"type":"calling","aspect":"green","label":"C1"},
+    {"id":"S6","x":640,"y":302,"type":"calling","aspect":"red","label":"C2"},
+    {"id":"S7","x":640,"y":392,"type":"calling","aspect":"yellow","label":"C3"},
+    {"id":"S8","x":1010,"y":72,"type":"outer","aspect":"green","label":"O1"},
+    {"id":"S9","x":1010,"y":112,"type":"outer","aspect":"green","label":"O2"}
+  ],
+  "platformBays": [
+    {"id":"PB1","platform":1,"x":85,"y":178,"width":570,"height":28},
+    {"id":"PB2","platform":2,"x":85,"y":208,"width":570,"height":28},
+    {"id":"PB3","platform":3,"x":85,"y":238,"width":570,"height":28},
+    {"id":"PB4","platform":4,"x":85,"y":268,"width":570,"height":28},
+    {"id":"PB5","platform":5,"x":85,"y":298,"width":570,"height":28},
+    {"id":"PB6","platform":6,"x":85,"y":328,"width":570,"height":28},
+    {"id":"PB7","platform":7,"x":85,"y":358,"width":570,"height":28},
+    {"id":"PB8","platform":8,"x":85,"y":388,"width":570,"height":28}
+  ],
+  "routes": [
+    {"id":"R1","name":"Route 1 - Up Through","tracks":["T1"],"signals":["S1","S3","S8"],"points":[]},
+    {"id":"R2","name":"Route 2 - Down Through","tracks":["T2"],"signals":["S2","S4","S9"],"points":[]},
+    {"id":"R3","name":"Route PF1","tracks":["T1","T3"],"signals":["S1","S5"],"points":["P1","P3"]},
+    {"id":"R4","name":"Route PF5","tracks":["T1","T7"],"signals":["S1","S6"],"points":["P1","P4"]}
+  ]
+}

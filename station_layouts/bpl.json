@@ -1,0 +1,57 @@
+{
+  "id": "BPL",
+  "name": "Bhopal Jn",
+  "zone": "WCR",
+  "platforms": 6,
+  "width": 1100,
+  "height": 480,
+  "tracks": [
+    {"id":"T1","x1":50,"y1":80,"x2":1050,"y2":80,"type":"main","label":"Up Main"},
+    {"id":"T2","x1":50,"y1":120,"x2":1050,"y2":120,"type":"main","label":"Down Main"},
+    {"id":"T3","x1":80,"y1":200,"x2":700,"y2":200,"type":"platform","label":"PF 1"},
+    {"id":"T4","x1":80,"y1":240,"x2":700,"y2":240,"type":"platform","label":"PF 2"},
+    {"id":"T5","x1":80,"y1":280,"x2":700,"y2":280,"type":"platform","label":"PF 3"},
+    {"id":"T6","x1":80,"y1":320,"x2":700,"y2":320,"type":"platform","label":"PF 4"},
+    {"id":"T7","x1":80,"y1":360,"x2":600,"y2":360,"type":"platform","label":"PF 5"},
+    {"id":"T8","x1":80,"y1":400,"x2":600,"y2":400,"type":"platform","label":"PF 6"},
+    {"id":"T9","x1":700,"y1":200,"x2":1050,"y2":200,"type":"loop","label":"Loop A"},
+    {"id":"T10","x1":700,"y1":320,"x2":1050,"y2":320,"type":"loop","label":"Loop B"},
+    {"id":"T11","x1":80,"y1":440,"x2":500,"y2":440,"type":"yard","label":"Yard"}
+  ],
+  "crossovers": [
+    {"id":"X1","x":200,"y":80,"toY":120},
+    {"id":"X2","x":500,"y":80,"toY":120},
+    {"id":"X3","x":800,"y":80,"toY":120}
+  ],
+  "points": [
+    {"id":"P1","x":140,"y":80,"state":"normal","angle":15,"label":"P1"},
+    {"id":"P2","x":140,"y":120,"state":"normal","angle":-15,"label":"P2"},
+    {"id":"P3","x":680,"y":200,"state":"normal","angle":12,"label":"P3"},
+    {"id":"P4","x":680,"y":360,"state":"reverse","angle":-12,"label":"P4"},
+    {"id":"P5","x":980,"y":200,"state":"normal","angle":10,"label":"P5"}
+  ],
+  "signals": [
+    {"id":"S1","x":80,"y":72,"type":"home","aspect":"green","label":"H1"},
+    {"id":"S2","x":80,"y":112,"type":"home","aspect":"red","label":"H2"},
+    {"id":"S3","x":350,"y":72,"type":"starter","aspect":"yellow","label":"ST1"},
+    {"id":"S4","x":350,"y":112,"type":"starter","aspect":"green","label":"ST2"},
+    {"id":"S5","x":620,"y":192,"type":"calling","aspect":"green","label":"C1"},
+    {"id":"S6","x":620,"y":312,"type":"calling","aspect":"red","label":"C2"},
+    {"id":"S7","x":1000,"y":72,"type":"outer","aspect":"green","label":"O1"},
+    {"id":"S8","x":1000,"y":112,"type":"outer","aspect":"yellow","label":"O2"}
+  ],
+  "platformBays": [
+    {"id":"PB1","platform":1,"x":85,"y":188,"width":590,"height":28},
+    {"id":"PB2","platform":2,"x":85,"y":228,"width":590,"height":28},
+    {"id":"PB3","platform":3,"x":85,"y":268,"width":590,"height":28},
+    {"id":"PB4","platform":4,"x":85,"y":308,"width":590,"height":28},
+    {"id":"PB5","platform":5,"x":85,"y":348,"width":490,"height":28},
+    {"id":"PB6","platform":6,"x":85,"y":388,"width":490,"height":28}
+  ],
+  "routes": [
+    {"id":"R1","name":"Route 1 - Up Through","tracks":["T1"],"signals":["S1","S3","S7"],"points":[]},
+    {"id":"R2","name":"Route 2 - Down Through","tracks":["T2"],"signals":["S2","S4","S8"],"points":[]},
+    {"id":"R3","name":"Route PF1","tracks":["T1","T3"],"signals":["S1","S5"],"points":["P1","P3"]},
+    {"id":"R4","name":"Route PF4","tracks":["T1","T6"],"signals":["S1","S6"],"points":["P1","P4"]}
+  ]
+}

@@ -17,7 +17,7 @@ import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
-
+from ntes_client import ntes_client
 from app.models.crowd_model import crowd_forecaster
 from app.schemas.crowd import (
     CrowdRequest,
@@ -158,3 +158,25 @@ async def get_heatmap(station_code: str) -> HeatmapResponse:
     except Exception as exc:
         logger.exception("Heatmap generation failed for station %s: %s", station_code, exc)
         raise HTTPException(status_code=500, detail=f"Heatmap generation failed: {exc}") from exc
+
+@router.get("/ntes/delays")
+async def get_ntes_delays():
+    """Live delay data for the NTES strip in the frontend."""
+    train_numbers = ["12301", "12951", "22439", "12002",
+                     "12595", "12213", "12203", "12433"]
+    try:
+        delays = ntes_client.get_bulk_delays(train_numbers)
+        trains = [
+            {
+                "train_number": tn,
+                "delay_minutes": delay,
+                "train_name": next(
+                    (t["train_name"] for t in sample_trains if t["train_number"] == tn),
+                    tn
+                ),
+            }
+            for tn, delay in delays.items()
+        ]
+        return {"trains": trains, "source": "NTES"}
+    except Exception:
+        return {"trains": [], "source": "unavailable"}
